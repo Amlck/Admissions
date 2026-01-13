@@ -48,6 +48,17 @@
         <span id="apiKeyStatus"></span>
       </div>
 
+      <div id="modelSelector" style="margin-bottom: 12px;">
+        <label><strong>Model:</strong>
+          <select id="modelSelect" style="margin-left: 8px; padding: 4px 8px; border-radius: 4px; border: 1px solid #ccc;">
+            <option value="gemini-3-pro-preview">Gemini 3 Pro (Best quality)</option>
+            <option value="gemini-3-flash-preview">Gemini 3 Flash (Fast)</option>
+            <option value="gemini-2.0-flash">Gemini 2.0 Flash (Stable)</option>
+            <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
+          </select>
+        </label>
+      </div>
+
       <textarea id="aiInputArea" placeholder="Paste your notes here, or click the microphone to dictate...
 
 Example:
@@ -56,6 +67,26 @@ Example:
 On exam: alert, diaphoretic. BP 160/95, HR 88, T 36.5, RR 18. Heart regular, no murmur. Lungs clear. Abdomen soft. No leg edema.
 
 PMH: HTN x 10 years on amlodipine, DM on metformin. No surgeries. NKDA. Father had MI at age 60. Non-smoker, occasional alcohol."></textarea>
+
+      <!-- Image Upload Section -->
+      <div id="imageUploadSection" style="margin-bottom: 12px;">
+        <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+          <input type="file" id="imageInput" accept="image/*" style="display: none;" />
+          <button id="imageUploadBtn" class="ai-btn" onclick="document.getElementById('imageInput').click();">
+            <span>📷</span>
+            <span>Upload Image</span>
+          </button>
+          <span id="imageFileName" style="color: #666; font-size: 0.9em;"></span>
+          <button id="clearImageBtn" class="ai-btn" style="display: none;">
+            <span>✕</span>
+            <span>Remove</span>
+          </button>
+        </div>
+        <div id="imagePreview" style="display: none; margin-top: 10px;">
+          <img id="previewImg" style="max-width: 300px; max-height: 200px; border-radius: 8px; border: 1px solid #ddd;" />
+        </div>
+        <p style="font-size: 0.85em; color: #666; margin-top: 6px;">Upload photos of handwritten notes - AI will extract and parse the text.</p>
+      </div>
 
       <div class="ai-button-row">
         <div class="lang-toggle">
@@ -502,6 +533,934 @@ CXR 2026/01/09: No cardiomegaly, no obvious pneumonia patch."></textarea>
     <div id="copy-toast">Note Copied!</div>
   </main>
 
-  <script type="module" src="js/app.js"></script>
+  <script>
+/**
+ * Admission Note Builder - Bundled Version
+ * All modules combined for file:// protocol compatibility
+ */
+
+// ============================================================================
+// CONFIG
+// ============================================================================
+const CONFIG = {
+  STORAGE_KEYS: {
+    DATA: 'admissionNoteData_AI',
+    BACKGROUND: 'admissionNoteBackground',
+    API_KEY: 'geminiApiKey'
+  },
+  API: {
+    BASE_URL: 'https://generativelanguage.googleapis.com/v1beta/models',
+    MODEL: 'gemini-3-cpro-preview',
+    MAX_OUTPUT_TOKENS: 8192,
+    TEMPERATURE: 0.1
+  },
+  RETRY: {
+    MAX_ATTEMPTS: 3,
+    INITIAL_DELAY_MS: 1000,
+    MAX_DELAY_MS: 10000,
+    BACKOFF_MULTIPLIER: 2
+  },
+  VOICE: {
+    LANGUAGES: { CHINESE: 'zh-TW', ENGLISH: 'en-US' },
+    DEFAULT_LANGUAGE: 'zh-TW'
+  },
+  UI: {
+    TOAST_DURATION_MS: 2000,
+    STATUS_HIDE_DELAY_MS: 3000,
+    MODAL_ANIMATION_MS: 300,
+    DEBOUNCE_DELAY_MS: 500
+  }
+};
+
+const AI_PROMPT_TEMPLATE = `Parse clinical notes to JSON for NTUH EMR. Output in ENGLISH only (translate Chinese if needed). Use null for missing info.
+
+IMPORTANT - NO ABBREVIATIONS: Always expand medical abbreviations to full terms. Examples:
+- HTN → Hypertension
+- DM → Diabetes Mellitus
+- CAD → Coronary Artery Disease
+- N/V → Nausea/Vomiting
+- ABx → Antibiotics
+- Rx → Treatment/Prescription
+- Hx → History
+- Dx → Diagnosis
+
+
+IMPORTANT: If an image is provided, first extract ALL text from the image (including handwritten notes). The image may contain handwritten clinical notes - carefully read and transcribe everything visible. Then parse the combined text content.
+
+Extract these fields:
+- chief_complaint: brief chief complaint for admission
+- age_sex: format as "*49M" or "*65F" (asterisk + age + sex)
+- patient_narrative: format as "This is a XX-year-old male/female with underlying disease of\\n#. Disease 1\\n#. Disease 2\\n\\nThe patient was..."
+- past_medical_history: numbered list with #. prefix
+- past_surgical_history: format as "YYYY_MM_DD  Procedure name"
+- hospitalization_history: format as "入院日期:YYYY_MM_DD 出院日期:YYYY_MM_DD 診斷:..."
+- medication_allergy: {denied: boolean, details: string}
+- current_medications: string
+- family_history: {HTN, DM, DLP, Cancer, CAD, details}
+- social_history: {alcohol, smoking, betel} - use "denied" or describe
+- tocc: {travel, occupation, contact, cluster}
+- vitals: {temperature, pulse, respiration, bp, height, weight, pain}
+- physical_exam: {general, consciousness, chest, heart, abdomen, extremities, neurological, local_findings}
+
+Generate Tentative Diagnosis (臆斷):
+- diagnosis_active: format as "[Active]\\n#. Main problem for admission\\n- status post treatment if any"
+- diagnosis_underlying: format as "[Underlying]\\n#. Condition 1\\n#. Condition 2"
+
+Generate SOAP for Medical Needs and Care Plan (醫療需求與治療計畫):
+- soap_s: chief complaint in bullet format "- symptom noted during..."
+- soap_o_general: format as "[General]\\n- code : full/aggressive\\n- vital signs: stable/unstable\\n- Consciousness: E4V5M6"
+- soap_o_local: "[Local findings]\\n- describe relevant findings"
+- soap_o_lab: "[lab]\\n- Hemogram: ...\\n- BCS: ..."
+- soap_o_image: "[image]\\n- CXR (-)\\n- ECG : NSR"
+- soap_a_active: same as diagnosis_active
+- soap_a_underlying: same as diagnosis_underlying
+- soap_plan: format as "- treatment step 1\\n- treatment step 2\\n- monitoring plan"
+- treatment_goal: "- goal description"
+
+Notes:
+{{CLINICAL_NOTES}}
+
+Return only valid JSON.`;
+
+// ============================================================================
+// ERROR HANDLING
+// ============================================================================
+class AppError extends Error {
+  constructor(message, code, details = null) {
+    super(message);
+    this.name = 'AppError';
+    this.code = code;
+    this.details = details;
+    this.timestamp = new Date().toISOString();
+  }
+}
+
+class ApiError extends AppError {
+  constructor(message, statusCode, response = null) {
+    super(message, 'API_ERROR', { statusCode, response });
+    this.name = 'ApiError';
+    this.statusCode = statusCode;
+  }
+}
+
+class NetworkError extends AppError {
+  constructor(message, originalError = null) {
+    super(message, 'NETWORK_ERROR', { originalError: originalError?.message });
+    this.name = 'NetworkError';
+  }
+}
+
+class ValidationError extends AppError {
+  constructor(message, field = null) {
+    super(message, 'VALIDATION_ERROR', { field });
+    this.name = 'ValidationError';
+  }
+}
+
+const ERROR_MESSAGES = {
+  400: 'Invalid request. Please check your input and try again.',
+  401: 'Invalid API key. Please check your Gemini API key.',
+  403: 'Access denied. Your API key may not have the required permissions.',
+  404: 'API endpoint not found. The service may be temporarily unavailable.',
+  429: 'Rate limit exceeded. Please wait a moment before trying again.',
+  500: 'Server error. The AI service is experiencing issues.',
+  502: 'Bad gateway. The AI service is temporarily unavailable.',
+  503: 'Service unavailable. Please try again later.',
+  NETWORK_ERROR: 'Network error. Please check your internet connection.',
+  OFFLINE: 'You appear to be offline. Please check your connection.',
+  UNKNOWN: 'An unexpected error occurred. Please try again.'
+};
+
+function getErrorMessage(error) {
+  if (error instanceof ApiError) return ERROR_MESSAGES[error.statusCode] || ERROR_MESSAGES.UNKNOWN;
+  if (error instanceof NetworkError) return !navigator.onLine ? ERROR_MESSAGES.OFFLINE : ERROR_MESSAGES.NETWORK_ERROR;
+  if (error instanceof ValidationError) return error.message || ERROR_MESSAGES.UNKNOWN;
+  return error.message || ERROR_MESSAGES.UNKNOWN;
+}
+
+function logError(error, context = {}) {
+  console.error('[AdmissionNoteBuilder Error]', { name: error.name, message: error.message, code: error.code, context, timestamp: new Date().toISOString() });
+}
+
+function isRetryableError(error) {
+  if (error instanceof NetworkError) return true;
+  if (error instanceof ApiError) return [429, 500, 502, 503].includes(error.statusCode);
+  return false;
+}
+
+function calculateRetryDelay(attempt, config) {
+  const delay = Math.min(config.INITIAL_DELAY_MS * Math.pow(config.BACKOFF_MULTIPLIER, attempt), config.MAX_DELAY_MS);
+  return delay + Math.random() * 1000;
+}
+
+// ============================================================================
+// UTILITIES
+// ============================================================================
+const getVal = (id, defaultVal = 'N/A') => {
+  const el = document.getElementById(id);
+  return el && el.value.trim() ? el.value.trim() : defaultVal;
+};
+
+const plusMinus = (cbId) => {
+  const el = document.getElementById(cbId);
+  return el && el.checked ? '■' : '□';
+};
+
+function debounce(func, wait) {
+  let timeout;
+  return function(...args) {
+    clearTimeout(timeout);
+    timeout = setTimeout(() => func(...args), wait);
+  };
+}
+
+function sanitizeHTML(text) {
+  if (!text) return '';
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+}
+
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+const isOnline = () => navigator.onLine;
+
+function safeJsonParse(jsonString, defaultValue = null) {
+  try { return JSON.parse(jsonString); } catch (e) { return defaultValue; }
+}
+
+function extractJsonFromText(text) {
+  let jsonStr = text;
+  if (text.includes('```json')) jsonStr = text.split('```json')[1].split('```')[0];
+  else if (text.includes('```')) jsonStr = text.split('```')[1].split('```')[0];
+  jsonStr = jsonStr.trim();
+
+  // Try to repair truncated JSON (for Gemini 3 models that may truncate)
+  if (!isValidJson(jsonStr)) {
+    jsonStr = repairTruncatedJson(jsonStr);
+  }
+  return jsonStr;
+}
+
+function isValidJson(str) {
+  try { JSON.parse(str); return true; } catch { return false; }
+}
+
+function repairTruncatedJson(jsonStr) {
+  // Count open/close braces and brackets
+  let braceCount = 0, bracketCount = 0, inString = false, escapeNext = false;
+  for (let i = 0; i < jsonStr.length; i++) {
+    const c = jsonStr[i];
+    if (escapeNext) { escapeNext = false; continue; }
+    if (c === '\\') { escapeNext = true; continue; }
+    if (c === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (c === '{') braceCount++;
+    else if (c === '}') braceCount--;
+    else if (c === '[') bracketCount++;
+    else if (c === ']') bracketCount--;
+  }
+
+  // If we're in a string, try to close it
+  if (inString) {
+    // Find last incomplete string and truncate there
+    const lastQuote = jsonStr.lastIndexOf('"');
+    if (lastQuote > 0) {
+      // Check if this quote starts a value
+      const beforeQuote = jsonStr.substring(0, lastQuote).trim();
+      if (beforeQuote.endsWith(':') || beforeQuote.endsWith(',') || beforeQuote.endsWith('[')) {
+        jsonStr = jsonStr.substring(0, lastQuote) + 'null';
+      } else {
+        jsonStr = jsonStr.substring(0, lastQuote + 1);
+      }
+    }
+  }
+
+  // Recount after string fix
+  braceCount = 0; bracketCount = 0; inString = false; escapeNext = false;
+  for (let i = 0; i < jsonStr.length; i++) {
+    const c = jsonStr[i];
+    if (escapeNext) { escapeNext = false; continue; }
+    if (c === '\\') { escapeNext = true; continue; }
+    if (c === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (c === '{') braceCount++;
+    else if (c === '}') braceCount--;
+    else if (c === '[') bracketCount++;
+    else if (c === ']') bracketCount--;
+  }
+
+  // Close unclosed brackets and braces
+  while (bracketCount > 0) { jsonStr += ']'; bracketCount--; }
+  while (braceCount > 0) { jsonStr += '}'; braceCount--; }
+
+  console.log('[JSON Repair] Applied truncation repair');
+  return jsonStr;
+}
+
+// ============================================================================
+// STORAGE
+// ============================================================================
+function saveToStorage(key, value) {
+  try {
+    localStorage.setItem(key, typeof value === 'object' ? JSON.stringify(value) : value);
+  } catch (error) {
+    logError(error, { key });
+  }
+}
+
+function loadFromStorage(key, defaultValue = null) {
+  try {
+    const item = localStorage.getItem(key);
+    if (item === null) return defaultValue;
+    const parsed = safeJsonParse(item, null);
+    return parsed !== null ? parsed : item;
+  } catch (error) {
+    return defaultValue;
+  }
+}
+
+function removeFromStorage(key) {
+  try { localStorage.removeItem(key); } catch (error) { }
+}
+
+const FormDataManager = {
+  save(formElements) {
+    const data = {};
+    formElements.forEach(el => { if (el.id) data[el.id] = el.type === 'checkbox' ? el.checked : el.value; });
+    saveToStorage(CONFIG.STORAGE_KEYS.DATA, data);
+  },
+  load(formElements) {
+    const data = loadFromStorage(CONFIG.STORAGE_KEYS.DATA);
+    if (!data) return false;
+    formElements.forEach(el => {
+      if (el.id && data[el.id] !== undefined) {
+        el.type === 'checkbox' ? el.checked = data[el.id] : el.value = data[el.id];
+      }
+    });
+    return true;
+  },
+  clear() { removeFromStorage(CONFIG.STORAGE_KEYS.DATA); }
+};
+
+const ApiKeyManager = {
+  save(key) { saveToStorage(CONFIG.STORAGE_KEYS.API_KEY, key); },
+  get() { return loadFromStorage(CONFIG.STORAGE_KEYS.API_KEY); },
+  clear() { removeFromStorage(CONFIG.STORAGE_KEYS.API_KEY); },
+  exists() { return !!this.get(); }
+};
+
+const ModelManager = {
+  STORAGE_KEY: 'geminiModel',
+  save(model) { saveToStorage(this.STORAGE_KEY, model); CONFIG.API.MODEL = model; },
+  get() { return loadFromStorage(this.STORAGE_KEY) || CONFIG.API.MODEL; },
+  init() { CONFIG.API.MODEL = this.get(); }
+};
+
+const BackgroundManager = {
+  save(dataUrl) { saveToStorage(CONFIG.STORAGE_KEYS.BACKGROUND, dataUrl); },
+  get() { return loadFromStorage(CONFIG.STORAGE_KEYS.BACKGROUND); },
+  clear() { removeFromStorage(CONFIG.STORAGE_KEYS.BACKGROUND); },
+  apply(element) { const bg = this.get(); if (bg) element.style.backgroundImage = `url(${bg})`; }
+};
+
+// ============================================================================
+// API
+// ============================================================================
+
+// Image state for multimodal parsing
+const ImageManager = {
+  currentImage: null,  // { base64: string, mimeType: string, fileName: string }
+
+  setImage(base64, mimeType, fileName) {
+    this.currentImage = { base64, mimeType, fileName };
+  },
+
+  clear() {
+    this.currentImage = null;
+  },
+
+  hasImage() {
+    return this.currentImage !== null;
+  },
+
+  getImage() {
+    return this.currentImage;
+  }
+};
+
+async function parseWithAI(inputText, callbacks = {}) {
+  const { onStatus, onSuccess, onError } = callbacks;
+  const apiKey = ApiKeyManager.get();
+  const hasImage = ImageManager.hasImage();
+  const hasText = inputText?.trim();
+
+  if (!apiKey) { onStatus?.('Please enter your Gemini API key first.', 'error'); return null; }
+  if (!hasText && !hasImage) { onStatus?.('Please enter some notes or upload an image to parse.', 'error'); return null; }
+
+  const url = `${CONFIG.API.BASE_URL}/${CONFIG.API.MODEL}:generateContent?key=${apiKey}`;
+
+  // Build parts array for multimodal request
+  const parts = [];
+
+  // Add text prompt
+  const textContent = hasText ? inputText : '(See attached image for clinical notes)';
+  parts.push({ text: AI_PROMPT_TEMPLATE.replace('{{CLINICAL_NOTES}}', textContent) });
+
+  // Add image if present (Gemini multimodal format)
+  if (hasImage) {
+    const img = ImageManager.getImage();
+    parts.push({
+      inlineData: {
+        mimeType: img.mimeType,
+        data: img.base64
+      }
+    });
+  }
+
+  const body = {
+    contents: [{ parts }],
+    generationConfig: { temperature: CONFIG.API.TEMPERATURE, maxOutputTokens: CONFIG.API.MAX_OUTPUT_TOKENS }
+  };
+
+  let lastError = null;
+  for (let attempt = 0; attempt < CONFIG.RETRY.MAX_ATTEMPTS; attempt++) {
+    try {
+      const statusMsg = hasImage
+        ? (attempt === 0 ? 'Parsing image and notes with AI... This may take a few seconds.' : `Retrying... (attempt ${attempt + 1}/${CONFIG.RETRY.MAX_ATTEMPTS})`)
+        : (attempt === 0 ? 'Parsing with AI... This may take a few seconds.' : `Retrying... (attempt ${attempt + 1}/${CONFIG.RETRY.MAX_ATTEMPTS})`);
+      onStatus?.(statusMsg, 'loading');
+
+      if (!isOnline()) throw new NetworkError('You appear to be offline.');
+
+      const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+
+      if (!response.ok) {
+        let errorDetails = null;
+        try { errorDetails = await response.json(); } catch (e) {}
+        throw new ApiError(errorDetails?.error?.message || `API request failed: ${response.status}`, response.status, errorDetails);
+      }
+
+      const data = await response.json();
+      console.log('[Gemini Response]', JSON.stringify(data, null, 2));
+
+      // Check for finish reason issues
+      const candidate = data?.candidates?.[0];
+      const finishReason = candidate?.finishReason;
+      if (finishReason && finishReason !== 'STOP') {
+        console.warn('[Gemini] Finish reason:', finishReason);
+        if (finishReason === 'MAX_TOKENS') {
+          console.warn('[Gemini] Response was truncated due to max tokens limit');
+        }
+      }
+
+      // Handle different response formats (Gemini 2.x vs 3.x)
+      // Gemini 3 may have multiple parts (thinking + output) or different structure
+      let text = null;
+      if (candidate?.content?.parts) {
+        const parts = candidate.content.parts;
+        console.log('[Gemini] Number of parts:', parts.length);
+
+        // Strategy 1: Find the part that looks most like JSON output
+        for (const part of parts) {
+          if (part.text) {
+            const trimmed = part.text.trim();
+            // Check if it starts with JSON or contains json code block
+            if (trimmed.startsWith('{') || trimmed.startsWith('```json')) {
+              text = part.text;
+              console.log('[Gemini] Found JSON-like part');
+              break;
+            }
+          }
+        }
+
+        // Strategy 2: If no JSON-like part, look for any part containing { and }
+        if (!text) {
+          for (const part of parts) {
+            if (part.text && part.text.includes('{') && part.text.includes('}')) {
+              text = part.text;
+              console.log('[Gemini] Found part containing JSON object');
+              break;
+            }
+          }
+        }
+
+        // Strategy 3: Fallback to last non-empty text part
+        if (!text) {
+          for (let i = parts.length - 1; i >= 0; i--) {
+            if (parts[i].text && parts[i].text.trim()) {
+              text = parts[i].text;
+              console.log('[Gemini] Using last text part as fallback');
+              break;
+            }
+          }
+        }
+      }
+
+      if (!text) {
+        console.error('[Gemini] No text found in response. Full response:', data);
+        throw new Error('Empty response from AI. The model returned no text content. Try using Gemini 2.0 Flash.');
+      }
+
+      const parsed = JSON.parse(extractJsonFromText(text));
+      onStatus?.('Successfully parsed and populated form fields!', 'success');
+      onSuccess?.(parsed);
+      return parsed;
+
+    } catch (error) {
+      lastError = error;
+      logError(error, { attempt, hasImage });
+      if (isRetryableError(error) && attempt < CONFIG.RETRY.MAX_ATTEMPTS - 1) {
+        const delay = calculateRetryDelay(attempt, CONFIG.RETRY);
+        onStatus?.(`Rate limited. Retrying in ${Math.round(delay / 1000)} seconds...`, 'loading');
+        await sleep(delay);
+        continue;
+      }
+      break;
+    }
+  }
+  onStatus?.(getErrorMessage(lastError), 'error');
+  onError?.(lastError);
+  return null;
+}
+
+// ============================================================================
+// VOICE RECOGNITION
+// ============================================================================
+class VoiceRecognitionManager {
+  constructor() {
+    this.recognition = null;
+    this.isRecording = false;
+    this.language = CONFIG.VOICE.DEFAULT_LANGUAGE;
+    this.callbacks = { onResult: null, onError: null, onStart: null, onEnd: null };
+  }
+
+  init() {
+    if (!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) return false;
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    this.recognition = new SpeechRecognition();
+    this.recognition.continuous = true;
+    this.recognition.interimResults = true;
+    this.recognition.lang = this.language;
+
+    this.recognition.onresult = (event) => {
+      let finalTranscript = '';
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        if (event.results[i].isFinal) finalTranscript += event.results[i][0].transcript + ' ';
+      }
+      if (finalTranscript) this.callbacks.onResult?.(finalTranscript);
+    };
+
+    this.recognition.onerror = (event) => {
+      this.stop();
+      const isChinese = this.language === CONFIG.VOICE.LANGUAGES.CHINESE;
+      this.callbacks.onError?.(isChinese ? `語音錯誤: ${event.error}` : `Voice error: ${event.error}`);
+    };
+
+    this.recognition.onend = () => { if (this.isRecording) try { this.recognition.start(); } catch (e) {} };
+    return true;
+  }
+
+  setCallbacks(callbacks) { this.callbacks = { ...this.callbacks, ...callbacks }; }
+  setLanguage(lang) { this.language = lang; if (this.recognition) this.recognition.lang = lang; }
+  isChinese() { return this.language === CONFIG.VOICE.LANGUAGES.CHINESE; }
+
+  start() {
+    if (!this.recognition && !this.init()) {
+      this.callbacks.onError?.(this.isChinese() ? '此瀏覽器不支援語音辨識。' : 'Voice recognition not supported.');
+      return false;
+    }
+    this.recognition.lang = this.language;
+    try { this.isRecording = true; this.recognition.start(); return true; } catch (e) { this.isRecording = false; return false; }
+  }
+
+  stop() { this.isRecording = false; if (this.recognition) try { this.recognition.stop(); } catch (e) {} }
+  toggle() { this.isRecording ? this.stop() : this.start(); return this.isRecording; }
+  getIsRecording() { return this.isRecording; }
+  getButtonText(recording = this.isRecording) { return recording ? (this.isChinese() ? '停止錄音' : 'Stop') : (this.isChinese() ? '開始錄音' : 'Start'); }
+  getListeningText() { return this.isChinese() ? '正在聆聽...' : 'Listening...'; }
+}
+
+const voiceManager = new VoiceRecognitionManager();
+
+// ============================================================================
+// UI MANAGERS
+// ============================================================================
+const StatusManager = {
+  element: null,
+  init(el) { this.element = el; },
+  show(message, type) { if (this.element) { this.element.textContent = message; this.element.className = type; this.element.style.display = 'block'; } },
+  hide() { if (this.element) { this.element.className = ''; this.element.style.display = 'none'; } }
+};
+
+const ToastManager = {
+  element: null,
+  init(el) { this.element = el; },
+  show(message, duration = CONFIG.UI.TOAST_DURATION_MS) { if (this.element) { this.element.textContent = message; this.element.classList.add('show'); setTimeout(() => this.element.classList.remove('show'), duration); } }
+};
+
+async function copyToClipboard(text) {
+  try {
+    if (navigator.clipboard) { await navigator.clipboard.writeText(text); return true; }
+    const ta = document.createElement('textarea'); ta.value = text; ta.style.position = 'fixed'; ta.style.left = '-9999px';
+    document.body.appendChild(ta); ta.select(); const success = document.execCommand('copy'); document.body.removeChild(ta); return success;
+  } catch (e) { return false; }
+}
+
+// ============================================================================
+// NOTE GENERATOR
+// ============================================================================
+function addSectionToOutput(title, content, container) {
+  if (!content || content.trim() === '' || content.trim() === 'N/A') return;
+  const sectionDiv = document.createElement('div');
+  sectionDiv.className = 'output-section';
+  sectionDiv.innerHTML = `<h3>${title}<button class="copy-section-btn" title="Copy">📋</button></h3><div class="output-content">${sanitizeHTML(content)}</div>`;
+  container.appendChild(sectionDiv);
+}
+
+function compileROS() {
+  let rosOutput = '系統性回顧(Review of Systems)\n(■: positive, □:negative)';
+  const rosDetails = getVal('ros_details', '');
+  if (rosDetails) rosOutput += `\n${rosDetails}\n`;
+  document.querySelectorAll('#rosSection details').forEach(det => {
+    const sysTitle = det.querySelector('summary').textContent.trim();
+    const items = det.querySelectorAll('input[type="checkbox"]');
+    const parts = Array.from(items).map(cb => `${plusMinus(cb.id)} ${cb.parentElement.textContent.trim()}`);
+    rosOutput += `\n- ${sysTitle}:\n    ${parts.join(', ')}`;
+  });
+  return rosOutput.trim();
+}
+
+function assembleHistoryBlock() {
+  const medAllergyDenied = document.getElementById('hist_med_allergy_denied')?.checked;
+  let medAllergyStr = medAllergyDenied ? 'No known' : (getVal('hist_med_allergy_details', '') || 'unknown');
+  if (!medAllergyDenied && getVal('hist_med_allergy_date', '')) medAllergyStr += ` (${getVal('hist_med_allergy_date', '')})`;
+
+  const deviceAllergyDenied = document.getElementById('hist_device_allergy_denied')?.checked;
+  let deviceAllergyStr = deviceAllergyDenied ? 'No known' : (getVal('hist_device_allergy_details', '') || 'unknown');
+
+  const fhArr = [`HTN ${plusMinus('fh_HTN')}`, `DM ${plusMinus('fh_DM')}`, `DLP ${plusMinus('fh_DLP')}`, `Cancer ${plusMinus('fh_CA')}`, `CAD ${plusMinus('fh_CAD')}`];
+  let fhStr = fhArr.join(', ');
+  if (getVal('fh_details', '')) fhStr += `\n${getVal('fh_details', '')}`;
+
+  return [
+    `病史(Patient History)\n${getVal('patientHistoryNarrative', 'Not specified')}`,
+    `[Past medical history]\n${getVal('hist_pmh', 'Not specified')}`,
+    `[Past surgical history]\n${getVal('hist_surgical_history_detailed', 'denied')}`,
+    `[Hospitalization]\n${getVal('hist_hospitalization_history', 'denied')}`,
+    `Current Medication:\n台大醫院: ${getVal('hist_current_med_ntuh', 'nil')}\nOther: ${getVal('hist_current_med_other', 'denied')}\n中草藥: ${getVal('hist_current_med_tcm', 'denied')}\n保健食品: ${getVal('hist_current_med_supplements', 'denied')}`,
+    `Allergy:\n- Medication Allergy: ${medAllergyStr}\n- Medication ADR: ${getVal('hist_med_adr', 'unknown')}\n- Device/Material Allergy: ${deviceAllergyStr}`,
+    `Family History:\n${fhStr}`,
+    `TOCC:\n- Travel: ${getVal('hist_tocc_travel', 'denied')}\n- Occupation: ${getVal('hist_tocc_occupation', 'N/A')}\n- Cluster/Contact: ${getVal('hist_tocc_cluster', 'denied')}`,
+    `Social History:\n- Alcohol: ${getVal('hist_abc_alcohol', 'denied')}\n- Betel: ${getVal('hist_abc_betel', 'denied')}\n- Smoking: ${getVal('hist_abc_smoking', 'denied')}`
+  ].join('\n\n');
+}
+
+function generateNotePreview(outputEl) {
+  outputEl.innerHTML = '';
+  addSectionToOutput('主訴(Chief Complaint)', `Informant: ${getVal('informant', 'patient and EMR')}\n${getVal('ccpi', 'Not specified')}`, outputEl);
+  addSectionToOutput('病史(Patient History)', assembleHistoryBlock(), outputEl);
+  addSectionToOutput('社會心理相關評估(Psychosocial Assessment)', getVal('psychosocial_assessment', 'pending'), outputEl);
+  addSectionToOutput('系統性回顧(Review of Systems)', compileROS(), outputEl);
+
+  let peText = `BH: ${getVal('vitals_bh', '--')} cm, BW: ${getVal('vitals_bw', '--')} kg\nT: ${getVal('vitals_t', '--')}°C, P: ${getVal('vitals_p', '--')} bpm, R: ${getVal('vitals_r', '--')}/min\nBP: ${getVal('vitals_bp', '--/--')} mmHg, Pain: ${getVal('vitals_pain', '0')}\n\n`;
+  if (getVal('pe_details', '')) peText += getVal('pe_details', '') + '\n\n';
+  peText += `[Neurological]\n- Consciousness: ${getVal('pe_neuro_conscious', 'E4V5M6')}\n- Muscle power: ${getVal('pe_neuro_power', 'intact')}\n- Gait: ${getVal('pe_neuro_gait', 'steady')}`;
+  addSectionToOutput('身體診察(Physical Examination)', peText, outputEl);
+
+  addSectionToOutput('影像報告(Imaging Report)', getVal('imaging_report', 'nil'), outputEl);
+  addSectionToOutput('病理報告(Pathology Report)', getVal('pathology_report', 'nil'), outputEl);
+  addSectionToOutput('臆斷(Tentative Diagnosis)', `[Active]\n${getVal('diagnosis_active', 'Not specified')}\n\n[Underlying]\n${getVal('diagnosis_underlying', 'Not specified')}`, outputEl);
+
+  const soapContent = `${getVal('plan_age_sex', '*--')}\n\nS:\n- ${getVal('ccpi', 'Not specified')}\n\nO:\n[General]\n- Consciousness: ${getVal('pe_neuro_conscious', 'E4V5M6')}\n\n[PE]\n${getVal('plan_pe_findings', 'See PE section')}\n\n[lab]\n${getVal('plan_lab_data', '- pending')}\n\n[image]\n- CXR ${getVal('plan_cxr_date', '')}: ${getVal('plan_cxr_interp', '(-)')}\n- ECG ${getVal('plan_ekg_date', '')}: ${getVal('plan_ekg_interp', 'NSR')}\n\nA:\n[Active]\n${getVal('plan_assessment_active', getVal('diagnosis_active', 'Not specified'))}\n\n[Underlying]\n${getVal('plan_assessment_underlying', getVal('diagnosis_underlying', 'Not specified'))}\n\nP:\n${getVal('plan_plan', '- symptomatic treatment')}\n\nTreatment goal:\n- ${getVal('plan_treatment_goal', 'clinical stability')}`;
+  addSectionToOutput('醫療需求與治療計畫(Medical Needs and Care Plan)', soapContent, outputEl);
+
+  addSectionToOutput('出院規劃(Discharge Planning)', `管路留置狀況：${getVal('dp_catheter', 'Nil')}\n日常生活功能分數：${getVal('dp_adl', '100')}\n預期出院後居住場所：${getVal('dp_residence', '與家人同住')}\n預期出院後主要照顧者：${getVal('dp_caregiver', '自己')}\n出院規劃收案篩檢：${getVal('dp_screening', '一般病患')}`, outputEl);
+}
+
+// ============================================================================
+// FORM POPULATOR
+// ============================================================================
+function populateForm(data) {
+  if (!data) return;
+  const setField = (id, value) => { if (value == null) return; const el = document.getElementById(id); if (el) { el.value = value; el.classList.add('ai-populated'); el.dispatchEvent(new Event('input', { bubbles: true })); } };
+  const setCheckbox = (id, checked) => { if (checked == null) return; const el = document.getElementById(id); if (el) { el.checked = checked; el.dispatchEvent(new Event('change', { bubbles: true })); } };
+
+  if (data.chief_complaint) setField('ccpi', data.chief_complaint);
+  if (data.age_sex) setField('plan_age_sex', data.age_sex);
+  if (data.patient_narrative) setField('patientHistoryNarrative', data.patient_narrative);
+  if (data.past_medical_history) setField('hist_pmh', data.past_medical_history);
+  if (data.past_surgical_history) setField('hist_surgical_history_detailed', data.past_surgical_history);
+  if (data.medication_allergy?.denied) setCheckbox('hist_med_allergy_denied', true);
+  else if (data.medication_allergy?.details) setField('hist_med_allergy_details', data.medication_allergy.details);
+  if (data.current_medications) setField('hist_current_med_other', data.current_medications);
+  if (data.family_history) {
+    setCheckbox('fh_HTN', data.family_history.HTN); setCheckbox('fh_DM', data.family_history.DM);
+    setCheckbox('fh_DLP', data.family_history.DLP); setCheckbox('fh_CA', data.family_history.Cancer);
+    setCheckbox('fh_CAD', data.family_history.CAD); if (data.family_history.details) setField('fh_details', data.family_history.details);
+  }
+  if (data.social_history) {
+    if (data.social_history.alcohol) setField('hist_abc_alcohol', data.social_history.alcohol);
+    if (data.social_history.smoking) setField('hist_abc_smoking', data.social_history.smoking);
+    if (data.social_history.betel) setField('hist_abc_betel', data.social_history.betel);
+  }
+  if (data.vitals) {
+    if (data.vitals.temperature) setField('vitals_t', data.vitals.temperature);
+    if (data.vitals.pulse) setField('vitals_p', data.vitals.pulse);
+    if (data.vitals.respiration) setField('vitals_r', data.vitals.respiration);
+    if (data.vitals.bp) setField('vitals_bp', data.vitals.bp);
+    if (data.vitals.height) setField('vitals_bh', data.vitals.height);
+    if (data.vitals.weight) setField('vitals_bw', data.vitals.weight);
+  }
+  if (data.physical_exam) {
+    const pe = [];
+    if (data.physical_exam.general) pe.push(`General: ${data.physical_exam.general}`);
+    if (data.physical_exam.chest) pe.push(`Chest: ${data.physical_exam.chest}`);
+    if (data.physical_exam.heart) pe.push(`Heart: ${data.physical_exam.heart}`);
+    if (data.physical_exam.abdomen) pe.push(`Abdomen: ${data.physical_exam.abdomen}`);
+    if (data.physical_exam.extremities) pe.push(`Extremities: ${data.physical_exam.extremities}`);
+    if (pe.length > 0) setField('pe_details', pe.join('\n'));
+    if (data.physical_exam.consciousness) setField('pe_neuro_conscious', data.physical_exam.consciousness);
+  }
+  if (data.tocc) {
+    if (data.tocc.travel) setField('hist_tocc_travel', data.tocc.travel);
+    if (data.tocc.occupation) setField('hist_tocc_occupation', data.tocc.occupation);
+    if (data.tocc.cluster) setField('hist_tocc_cluster', data.tocc.cluster);
+  }
+  if (data.diagnosis_active) setField('diagnosis_active', data.diagnosis_active.replace(/\[Active\]\n?/g, ''));
+  if (data.diagnosis_underlying) setField('diagnosis_underlying', data.diagnosis_underlying.replace(/\[Underlying\]\n?/g, ''));
+  if (data.soap_o_lab) setField('plan_lab_data', data.soap_o_lab.replace(/\[lab\]\n?/g, ''));
+  if (data.soap_a_active) setField('plan_assessment_active', data.soap_a_active.replace(/\[Active\]\n?/g, ''));
+  if (data.soap_a_underlying) setField('plan_assessment_underlying', data.soap_a_underlying.replace(/\[Underlying\]\n?/g, ''));
+  if (data.soap_plan) setField('plan_plan', data.soap_plan);
+  if (data.treatment_goal) setField('plan_treatment_goal', data.treatment_goal.replace(/^- /, ''));
+}
+
+// ============================================================================
+// MAIN APPLICATION
+// ============================================================================
+document.addEventListener('DOMContentLoaded', () => {
+  const sectionsContainer = document.getElementById('sectionsContainer');
+  const blockContainer = document.getElementById('blockContainer');
+  const allFormElements = Array.from(sectionsContainer.querySelectorAll('input, textarea'));
+  const allSections = Array.from(sectionsContainer.querySelectorAll('section'));
+  const blocks = {};
+
+  const modalOverlay = document.getElementById('modalOverlay');
+  const modalBody = document.getElementById('modalBody');
+  const modalClose = document.getElementById('modalClose');
+  const noteOutputEl = document.getElementById('noteOutput');
+
+  StatusManager.init(document.getElementById('aiStatus'));
+  ToastManager.init(document.getElementById('copy-toast'));
+
+  // Build blocks
+  allSections.forEach(section => {
+    const block = document.createElement('div');
+    block.className = 'block';
+    block.dataset.sectionId = section.id;
+    block.innerHTML = `<h2>${section.dataset.title || 'Section'}</h2>`;
+    blockContainer.appendChild(block);
+    blocks[section.id] = block;
+  });
+
+  // UI State
+  function isSectionFilled(section) {
+    for (const input of section.querySelectorAll('input[type="text"], textarea')) if (input.value.trim()) return true;
+    for (const cb of section.querySelectorAll('input[type="checkbox"]')) if (cb.checked) return true;
+    return false;
+  }
+
+  function updateUIState() {
+    let allFilled = true;
+    allSections.forEach(section => {
+      const filled = isSectionFilled(section);
+      blocks[section.id].classList.toggle('completed', filled);
+      if (!filled) allFilled = false;
+    });
+    document.getElementById('copyFullNoteBtn').classList.toggle('ready', allFilled);
+    generateNotePreview(noteOutputEl);
+  }
+
+  const debouncedSave = debounce(() => { FormDataManager.save(allFormElements); updateUIState(); }, CONFIG.UI.DEBOUNCE_DELAY_MS);
+
+  // Modal
+  function openModal(sectionId) {
+    const section = document.getElementById(sectionId);
+    if (section) { modalBody.appendChild(section); modalOverlay.style.display = 'flex'; requestAnimationFrame(() => modalOverlay.classList.add('active')); }
+  }
+
+  function closeModal() {
+    modalOverlay.classList.remove('active');
+    setTimeout(() => { modalOverlay.style.display = 'none'; const s = modalBody.querySelector('section'); if (s) { sectionsContainer.appendChild(s); debouncedSave(); } }, CONFIG.UI.MODAL_ANIMATION_MS);
+  }
+
+  blockContainer.addEventListener('click', e => { const b = e.target.closest('.block'); if (b) openModal(b.dataset.sectionId); });
+  modalClose.addEventListener('click', closeModal);
+  modalOverlay.addEventListener('click', e => { if (e.target === modalOverlay) closeModal(); });
+
+  // API Key
+  const apiKeySetup = document.getElementById('apiKeySetup');
+  const parseBtn = document.getElementById('parseBtn');
+
+  function checkApiKey() {
+    if (ApiKeyManager.exists()) { apiKeySetup.style.display = 'none'; parseBtn.disabled = false; return true; }
+    parseBtn.disabled = true; return false;
+  }
+
+  document.getElementById('saveApiKey').addEventListener('click', () => {
+    const key = document.getElementById('apiKeyInput').value.trim();
+    if (key) { ApiKeyManager.save(key); document.getElementById('apiKeyStatus').textContent = ' ✓ Saved!'; setTimeout(() => { apiKeySetup.style.display = 'none'; parseBtn.disabled = false; }, 1000); }
+  });
+
+  document.getElementById('clear-api-key').addEventListener('click', () => {
+    ApiKeyManager.clear(); apiKeySetup.style.display = 'block'; document.getElementById('apiKeyInput').value = '';
+    document.getElementById('apiKeyStatus').textContent = ''; parseBtn.disabled = true;
+    document.getElementById('settings-menu').style.display = 'none';
+  });
+
+  // AI Parsing
+  parseBtn.addEventListener('click', async () => {
+    parseBtn.disabled = true;
+    await parseWithAI(document.getElementById('aiInputArea').value.trim(), {
+      onStatus: (msg, type) => StatusManager.show(msg, type),
+      onSuccess: (data) => { populateForm(data); debouncedSave(); setTimeout(() => StatusManager.hide(), CONFIG.UI.STATUS_HIDE_DELAY_MS); },
+      onError: () => {}
+    });
+    parseBtn.disabled = !ApiKeyManager.exists();
+  });
+
+  document.getElementById('clearAiBtn').addEventListener('click', () => {
+    document.getElementById('aiInputArea').value = '';
+    clearUploadedImage();
+    StatusManager.hide();
+  });
+
+  // Image Upload Handling
+  const imageInput = document.getElementById('imageInput');
+  const imageFileName = document.getElementById('imageFileName');
+  const clearImageBtn = document.getElementById('clearImageBtn');
+  const imagePreview = document.getElementById('imagePreview');
+  const previewImg = document.getElementById('previewImg');
+
+  function clearUploadedImage() {
+    ImageManager.clear();
+    imageInput.value = '';
+    imageFileName.textContent = '';
+    clearImageBtn.style.display = 'none';
+    imagePreview.style.display = 'none';
+    previewImg.src = '';
+  }
+
+  imageInput.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    // Validate file type
+    if (!file.type.startsWith('image/')) {
+      StatusManager.show('Please select an image file.', 'error');
+      return;
+    }
+
+    // Validate file size (max 10MB for Gemini)
+    if (file.size > 10 * 1024 * 1024) {
+      StatusManager.show('Image too large. Please use an image under 10MB.', 'error');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const dataUrl = event.target.result;
+      // Extract base64 data (remove data:image/xxx;base64, prefix)
+      const base64Data = dataUrl.split(',')[1];
+      const mimeType = file.type;
+
+      ImageManager.setImage(base64Data, mimeType, file.name);
+
+      // Update UI
+      imageFileName.textContent = file.name;
+      clearImageBtn.style.display = 'inline-flex';
+      previewImg.src = dataUrl;
+      imagePreview.style.display = 'block';
+
+      StatusManager.show('Image uploaded. Click "Parse with AI" to process.', 'success');
+      setTimeout(() => StatusManager.hide(), 2000);
+    };
+
+    reader.onerror = () => {
+      StatusManager.show('Failed to read image file.', 'error');
+    };
+
+    reader.readAsDataURL(file);
+  });
+
+  clearImageBtn.addEventListener('click', clearUploadedImage);
+
+  // Voice
+  const voiceBtn = document.getElementById('voiceBtn');
+  const voiceIcon = document.getElementById('voiceIcon');
+  const voiceText = document.getElementById('voiceText');
+  const voiceLang = document.getElementById('voiceLang');
+
+  function updateVoiceUI(recording) {
+    voiceBtn.classList.toggle('recording', recording);
+    voiceIcon.textContent = recording ? '⏹️' : '🎤';
+    voiceText.textContent = voiceManager.getButtonText(recording);
+  }
+
+  voiceLang.addEventListener('change', () => { voiceManager.setLanguage(voiceLang.value); updateVoiceUI(voiceManager.getIsRecording()); });
+  voiceManager.setCallbacks({
+    onResult: (t) => { document.getElementById('aiInputArea').value += t; },
+    onError: (msg) => { StatusManager.show(msg, 'error'); updateVoiceUI(false); },
+    onStart: () => StatusManager.show(voiceManager.getListeningText(), 'loading'),
+    onEnd: () => StatusManager.hide()
+  });
+
+  voiceBtn.addEventListener('click', () => { const r = voiceManager.toggle(); updateVoiceUI(r); if (!r) StatusManager.hide(); });
+
+  // Copy buttons
+  document.getElementById('copyFullNoteBtn').addEventListener('click', async () => { if (await copyToClipboard(noteOutputEl.innerText)) ToastManager.show('Full Note Copied!'); });
+  document.getElementById('copyHistoryBtn').addEventListener('click', async () => { if (await copyToClipboard(assembleHistoryBlock())) ToastManager.show('History Block Copied!'); });
+  document.getElementById('noteOutputContainer').addEventListener('click', async e => {
+    const btn = e.target.closest('.copy-section-btn');
+    if (btn) { const content = btn.closest('.output-section').querySelector('.output-content').innerText; if (await copyToClipboard(content)) { btn.textContent = '✔️'; setTimeout(() => btn.textContent = '📋', 1500); } }
+  });
+
+  // Settings
+  const settingsGear = document.getElementById('settings-gear');
+  const settingsMenu = document.getElementById('settings-menu');
+  const settingsContainer = document.getElementById('settings-container');
+  settingsGear.addEventListener('click', () => { settingsMenu.style.display = settingsMenu.style.display === 'block' ? 'none' : 'block'; });
+  document.addEventListener('click', e => { if (!settingsContainer.contains(e.target) && settingsMenu.style.display === 'block') settingsMenu.style.display = 'none'; });
+
+  document.getElementById('clear-data').addEventListener('click', () => { if (confirm('Clear all data for new patient?')) { FormDataManager.clear(); location.reload(); } });
+
+  document.getElementById('background-input').addEventListener('change', e => {
+    const file = e.target.files[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => { document.body.style.backgroundImage = `url(${ev.target.result})`; BackgroundManager.save(ev.target.result); };
+    reader.readAsDataURL(file);
+  });
+
+  document.getElementById('reset-background').addEventListener('click', () => { document.body.style.backgroundImage = ''; BackgroundManager.clear(); });
+
+  // Auto-save
+  sectionsContainer.addEventListener('input', debouncedSave);
+
+  // Model Selector
+  const modelSelect = document.getElementById('modelSelect');
+  ModelManager.init();
+  modelSelect.value = ModelManager.get();
+  modelSelect.addEventListener('change', () => {
+    ModelManager.save(modelSelect.value);
+    console.log('[Model changed]', modelSelect.value);
+  });
+
+  // Initialize
+  FormDataManager.load(allFormElements);
+  BackgroundManager.apply(document.body);
+  checkApiKey();
+  updateUIState();
+
+  console.log('Admission Note Builder initialized with model:', CONFIG.API.MODEL);
+});
+  </script>
 </body>
 </html>
