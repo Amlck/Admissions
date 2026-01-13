@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admission Note Builder - Tests</title>
+  <style>
+    body {
+      font-family: 'SF Mono', 'Monaco', 'Consolas', monospace;
+      max-width: 800px;
+      margin: 40px auto;
+      padding: 20px;
+      background: #1a1a2e;
+      color: #eee;
+    }
+    h1 {
+      color: #14b8a6;
+      border-bottom: 2px solid #14b8a6;
+      padding-bottom: 10px;
+    }
+    #output {
+      background: #16213e;
+      padding: 20px;
+      border-radius: 8px;
+      white-space: pre-wrap;
+      line-height: 1.6;
+    }
+    .pass { color: #4ade80; }
+    .fail { color: #f87171; }
+    .suite { color: #60a5fa; font-weight: bold; }
+    .summary {
+      margin-top: 20px;
+      padding: 15px;
+      border-radius: 8px;
+      font-size: 1.1em;
+    }
+    .summary.pass { background: rgba(74, 222, 128, 0.2); border: 1px solid #4ade80; }
+    .summary.fail { background: rgba(248, 113, 113, 0.2); border: 1px solid #f87171; }
+  </style>
+</head>
+<body>
+  <h1>Admission Note Builder - Test Suite</h1>
+  <div id="output">Loading tests...</div>
+  <div id="summary"></div>
+
+  <script type="module">
+    // Override console.log to display in page
+    const output = document.getElementById('output');
+    const summary = document.getElementById('summary');
+    output.innerHTML = '';
+
+    const originalLog = console.log;
+    const originalError = console.error;
+
+    console.log = (...args) => {
+      originalLog.apply(console, args);
+      const text = args.join(' ');
+      const span = document.createElement('span');
+
+      if (text.includes('✓')) {
+        span.className = 'pass';
+      } else if (text.includes('✗')) {
+        span.className = 'fail';
+      } else if (text.startsWith('Utils') || text.startsWith('Errors') || text.includes('Running')) {
+        span.className = 'suite';
+      }
+
+      span.textContent = text + '\n';
+      output.appendChild(span);
+    };
+
+    console.error = (...args) => {
+      originalError.apply(console, args);
+      const span = document.createElement('span');
+      span.className = 'fail';
+      span.textContent = args.join(' ') + '\n';
+      output.appendChild(span);
+    };
+
+    // Import and run tests
+    import { printSummary, getResults } from './test-runner.js';
+    import './utils.test.js';
+    import './errors.test.js';
+
+    // Print summary after a short delay to ensure all tests complete
+    setTimeout(() => {
+      const allPassed = printSummary();
+      const results = getResults();
+
+      summary.className = 'summary ' + (allPassed ? 'pass' : 'fail');
+      summary.innerHTML = allPassed
+        ? `All ${results.passed} tests passed!`
+        : `${results.failed} of ${results.passed + results.failed} tests failed`;
+    }, 100);
+  </script>
+</body>
+</html>

@@ -1,0 +1,25 @@
+{
+  "name": "admission-note-builder",
+  "version": "2.0.0",
+  "description": "AI-powered Admission Note Builder for NTUH EMR integration",
+  "type": "module",
+  "main": "js/app.js",
+  "scripts": {
+    "start": "python3 -m http.server 8080",
+    "test": "echo 'Open tests/run-tests.html in a browser to run tests'"
+  },
+  "keywords": [
+    "medical",
+    "emr",
+    "admission-note",
+    "ai",
+    "gemini",
+    "clinical-documentation"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Amlck/Admissions"
+  }
+}
