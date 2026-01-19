@@ -111,6 +111,12 @@ PMH: HTN x 10 years on amlodipine, DM on metformin. No surgeries. NKDA. Father h
       </div>
 
       <div id="aiStatus"></div>
+      <div id="aiProgressContainer" style="display: none; margin-top: 10px;">
+        <div id="aiProgressBar" style="height: 4px; background: #e0e0e0; border-radius: 2px; overflow: hidden;">
+          <div id="aiProgressFill" style="height: 100%; width: 0%; background: linear-gradient(90deg, #4285f4, #34a853); transition: width 0.3s ease-out;"></div>
+        </div>
+        <div id="aiProgressText" style="font-size: 0.85em; color: #666; margin-top: 4px; text-align: center;"></div>
+      </div>
     </div>
 
     <div id="blockContainer"></div>
@@ -1090,6 +1096,81 @@ const StatusManager = {
   hide() { if (this.element) { this.element.className = ''; this.element.style.display = 'none'; } }
 };
 
+// Progress bar manager for visual feedback during AI parsing
+const ProgressManager = {
+  container: null,
+  fill: null,
+  text: null,
+  intervalId: null,
+  currentProgress: 0,
+
+  init() {
+    this.container = document.getElementById('aiProgressContainer');
+    this.fill = document.getElementById('aiProgressFill');
+    this.text = document.getElementById('aiProgressText');
+  },
+
+  start() {
+    if (!this.container) this.init();
+    this.currentProgress = 0;
+    this.fill.style.width = '0%';
+    this.container.style.display = 'block';
+    this.text.textContent = 'Sending to AI...';
+
+    // Animate progress: fast at start, slower as it approaches 90%
+    let speed = 2;
+    this.intervalId = setInterval(() => {
+      if (this.currentProgress < 30) {
+        speed = 3;
+        this.text.textContent = 'Sending to AI...';
+      } else if (this.currentProgress < 60) {
+        speed = 1.5;
+        this.text.textContent = 'AI is processing...';
+      } else if (this.currentProgress < 85) {
+        speed = 0.5;
+        this.text.textContent = 'Parsing response...';
+      } else {
+        speed = 0.1;
+        this.text.textContent = 'Almost done...';
+      }
+      this.currentProgress = Math.min(90, this.currentProgress + speed);
+      this.fill.style.width = this.currentProgress + '%';
+    }, 100);
+  },
+
+  complete() {
+    if (this.intervalId) {
+      clearInterval(this.intervalId);
+      this.intervalId = null;
+    }
+    this.currentProgress = 100;
+    this.fill.style.width = '100%';
+    this.text.textContent = 'Done!';
+    setTimeout(() => this.hide(), 1500);
+  },
+
+  error(message) {
+    if (this.intervalId) {
+      clearInterval(this.intervalId);
+      this.intervalId = null;
+    }
+    this.fill.style.background = '#dc3545';
+    this.text.textContent = message || 'Error occurred';
+    setTimeout(() => {
+      this.hide();
+      this.fill.style.background = 'linear-gradient(90deg, #4285f4, #34a853)';
+    }, 3000);
+  },
+
+  hide() {
+    if (this.container) {
+      this.container.style.display = 'none';
+      this.fill.style.width = '0%';
+      this.currentProgress = 0;
+    }
+  }
+};
+
 const ToastManager = {
   element: null,
   init(el) { this.element = el; },
@@ -1319,10 +1400,18 @@ document.addEventListener('DOMContentLoaded', () => {
   // AI Parsing
   parseBtn.addEventListener('click', async () => {
     parseBtn.disabled = true;
+    ProgressManager.start();
     await parseWithAI(document.getElementById('aiInputArea').value.trim(), {
       onStatus: (msg, type) => StatusManager.show(msg, type),
-      onSuccess: (data) => { populateForm(data); debouncedSave(); setTimeout(() => StatusManager.hide(), CONFIG.UI.STATUS_HIDE_DELAY_MS); },
-      onError: () => {}
+      onSuccess: (data) => {
+        ProgressManager.complete();
+        populateForm(data);
+        debouncedSave();
+        setTimeout(() => StatusManager.hide(), CONFIG.UI.STATUS_HIDE_DELAY_MS);
+      },
+      onError: (error) => {
+        ProgressManager.error(getErrorMessage(error));
+      }
     });
     parseBtn.disabled = !ApiKeyManager.exists();
   });
