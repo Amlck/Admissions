@@ -63,6 +63,60 @@ function validateInputs(apiKey, inputText) {
 }
 
 /**
+ * Detect specific network error type from fetch error
+ * @param {Error} error - The caught error
+ * @returns {string} Specific error message
+ */
+function getSpecificNetworkError(error) {
+  const message = error.message?.toLowerCase() || '';
+
+  // Connection refused / server unreachable
+  if (message.includes('failed to fetch') || message.includes('networkerror')) {
+    if (!navigator.onLine) {
+      return 'Connection lost. Please check your internet connection.';
+    }
+    return 'Unable to reach the AI service. The server may be down or blocked.';
+  }
+
+  // DNS resolution failed
+  if (message.includes('dns') || message.includes('getaddrinfo') || message.includes('nodename nor servname')) {
+    return 'DNS lookup failed. Please check your internet connection.';
+  }
+
+  // Connection timeout
+  if (message.includes('timeout') || message.includes('timed out')) {
+    return 'Connection timed out. The server took too long to respond.';
+  }
+
+  // SSL/TLS errors
+  if (message.includes('ssl') || message.includes('certificate') || message.includes('cert')) {
+    return 'Secure connection failed. There may be a network security issue.';
+  }
+
+  // Connection reset
+  if (message.includes('econnreset') || message.includes('connection reset')) {
+    return 'Connection was reset. Please try again.';
+  }
+
+  // Connection aborted
+  if (message.includes('aborted') || message.includes('abort')) {
+    return 'Request was aborted. Please try again.';
+  }
+
+  // CORS errors (typically manifest as TypeErrors)
+  if (message.includes('cors') || message.includes('cross-origin')) {
+    return 'Cross-origin request blocked. This may be a configuration issue.';
+  }
+
+  // Generic offline
+  if (!navigator.onLine) {
+    return 'Connection lost. Please check your internet connection.';
+  }
+
+  return 'Network request failed. Please check your connection and try again.';
+}
+
+/**
  * Make API request with error handling
  * @param {string} url - API URL
  * @param {Object} body - Request body
@@ -72,7 +126,7 @@ function validateInputs(apiKey, inputText) {
 async function makeApiRequest(url, body) {
   // Check network connectivity first
   if (!isOnline()) {
-    throw new NetworkError('You appear to be offline. Please check your internet connection.');
+    throw new NetworkError('Connection lost. Please check your internet connection.');
   }
 
   try {
@@ -107,9 +161,10 @@ async function makeApiRequest(url, body) {
       throw error;
     }
 
-    // Wrap fetch errors as NetworkError
+    // Wrap fetch errors as NetworkError with specific message
     if (error.name === 'TypeError' || error.message.includes('fetch')) {
-      throw new NetworkError('Network request failed. Please check your connection.', error);
+      const specificMessage = getSpecificNetworkError(error);
+      throw new NetworkError(specificMessage, error);
     }
 
     throw error;
@@ -171,18 +226,22 @@ export async function parseWithAI(inputText, callbacks = {}) {
   // Retry loop
   for (let attempt = 0; attempt < CONFIG.RETRY.MAX_ATTEMPTS; attempt++) {
     try {
-      // Show status for retries
+      // Show status
       if (attempt === 0) {
-        onStatus?.('Parsing with AI... This may take a few seconds.', 'loading');
+        onStatus?.('Sending to AI...', 'loading');
       } else {
         onStatus?.(`Retrying... (attempt ${attempt + 1}/${CONFIG.RETRY.MAX_ATTEMPTS})`, 'loading');
       }
 
       const response = await makeApiRequest(url, body);
+
+      onStatus?.('Parsing response...', 'loading');
       const parsed = parseApiResponse(response);
 
-      onStatus?.('Successfully parsed and populated form fields!', 'success');
+      onStatus?.('Populating form...', 'loading');
       onSuccess?.(parsed);
+
+      onStatus?.('Done!', 'success');
       return parsed;
 
     } catch (error) {
@@ -192,7 +251,8 @@ export async function parseWithAI(inputText, callbacks = {}) {
       // Check if we should retry
       if (isRetryableError(error) && attempt < CONFIG.RETRY.MAX_ATTEMPTS - 1) {
         const delay = calculateRetryDelay(attempt, CONFIG.RETRY);
-        onStatus?.(`Rate limited. Retrying in ${Math.round(delay / 1000)} seconds...`, 'loading');
+        const errorType = error instanceof NetworkError ? 'Connection issue' : 'Rate limited';
+        onStatus?.(`${errorType}. Retrying in ${Math.round(delay / 1000)} seconds...`, 'loading');
         await sleep(delay);
         continue;
       }

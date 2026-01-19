@@ -87,10 +87,24 @@ const ERROR_MESSAGES = {
  */
 export function getErrorMessage(error) {
   if (error instanceof ApiError) {
-    return ERROR_MESSAGES[error.statusCode] || ERROR_MESSAGES.UNKNOWN;
+    // Use specific API error messages based on status code
+    const statusMessage = ERROR_MESSAGES[error.statusCode];
+    if (statusMessage) {
+      return statusMessage;
+    }
+    // For unknown status codes, return the error message if descriptive
+    if (error.message && !error.message.includes('API request failed')) {
+      return error.message;
+    }
+    return ERROR_MESSAGES.UNKNOWN;
   }
 
   if (error instanceof NetworkError) {
+    // NetworkError now contains specific messages - use them directly
+    if (error.message && error.message !== 'Network error') {
+      return error.message;
+    }
+    // Fallback to generic messages
     if (!navigator.onLine) {
       return ERROR_MESSAGES.OFFLINE;
     }
