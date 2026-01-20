@@ -3,10 +3,16 @@
   "version": "2.0.0",
   "description": "AI-powered Admission Note Builder for NTUH EMR integration",
   "type": "module",
-  "main": "js/app.js",
+  "main": "src/main.ts",
   "scripts": {
-    "start": "python3 -m http.server 8080",
-    "test": "echo 'Open tests/run-tests.html in a browser to run tests'"
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "start": "python3 -m http.server 8080"
   },
   "keywords": [
     "medical",
@@ -21,5 +27,14 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/Amlck/Admissions"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.9",
+    "@vitest/coverage-v8": "^4.0.17",
+    "jsdom": "^27.4.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1",
+    "vite-plugin-singlefile": "^2.3.0",
+    "vitest": "^4.0.17"
   }
 }
